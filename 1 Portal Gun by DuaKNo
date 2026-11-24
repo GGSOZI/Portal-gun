@@ -46,6 +46,7 @@ local holding = false
 local tool, gun
 local releaseGrab, startGrab
 local lastShot, lastTP = 0, 0
+local lastKey = "blue"
 local boost = 1
 local exitP = nil
 local hud
@@ -78,6 +79,185 @@ end
 local function otherOf(key) return key == "blue" and portals.yellow or portals.blue end
 
 local function darkOf(col) return col:Lerp(Color3.new(0, 0, 0), 0.9) end
+
+-- ===== Particle library: Dua's VFX logger emitters (Flash, Flash2, BlueFlame2) =====
+-- Each emitter is built from the logged properties and re-coloured per portal (blue / yellow).
+local K = NumberSequenceKeypoint.new
+local PAL = {
+	blue   = { flash = Color3.new(0, 0.137255, 0.968628), flame = Color3.new(0, 0.666667, 1) },
+	yellow = { flash = Color3.new(1, 0.78, 0),            flame = Color3.new(1, 0.6, 0.05) },
+}
+local SQUASH = NumberSequence.new({ K(0, 0, 0), K(1, 0, 0) })
+local FADE = NumberSequence.new({ K(0, 0, 0), K(0.528013, 0, 0), K(0.71723, 0.89375, 0), K(1, 1, 0) })
+local EMIT = {
+	Flash = { tint = "flash", props = {
+		{ "Texture", "rbxassetid://12993580758" },
+		{ "Rate", 50.2429 },
+		{ "Lifetime", NumberRange.new(0.0155463, 0.0310925) },
+		{ "Speed", NumberRange.new(0.0020965, 0.0020965) },
+		{ "Size", NumberSequence.new({ K(0, 0, 0), K(0.1, 0.627648, 0), K(0.2, 1.22055, 0), K(0.3, 1.77464, 0), K(0.4, 2.28493, 0), K(0.5, 2.74513, 0), K(0.6, 3.1472, 0), K(0.7, 3.48056, 0), K(0.8, 3.73109, 0), K(0.9, 3.88064, 0), K(1, 3.91909, 0) }) },
+		{ "Transparency", FADE },
+		{ "Rotation", NumberRange.new(-360, 360) },
+		{ "RotSpeed", NumberRange.new(0, 0) },
+		{ "SpreadAngle", Vector2.new(-360, 360) },
+		{ "Acceleration", Vector3.new(0, 0, 0) },
+		{ "Drag", 0 },
+		{ "EmissionDirection", Enum.NormalId.Top },
+		{ "LightEmission", -15 },
+		{ "LightInfluence", 0 },
+		{ "LockedToPart", true },
+		{ "ZOffset", 1.5 },
+		{ "Orientation", Enum.ParticleOrientation.VelocityParallel },
+		{ "VelocityInheritance", 0 },
+		{ "TimeScale", 1 },
+		{ "Squash", SQUASH },
+		{ "Shape", Enum.ParticleEmitterShape.Box },
+		{ "ShapeInOut", Enum.ParticleEmitterShapeInOut.Outward },
+		{ "ShapeStyle", Enum.ParticleEmitterShapeStyle.Volume },
+		{ "ShapePartial", 1 },
+		{ "FlipbookLayout", Enum.ParticleFlipbookLayout.None },
+		{ "FlipbookMode", Enum.ParticleFlipbookMode.Loop },
+		{ "FlipbookFramerate", NumberRange.new(6.43241, 6.43241) },
+		{ "FlipbookStartRandom", false },
+		{ "Brightness", 25 },
+	} },
+	Flash2 = { tint = "flash", props = {
+		{ "Texture", "rbxassetid://13853120945" },
+		{ "Rate", 14.8988 },
+		{ "Lifetime", NumberRange.new(0.0357549, 0.0357549) },
+		{ "Speed", NumberRange.new(0.00454326, 0.00454326) },
+		{ "Size", NumberSequence.new({ K(0, 4.52715, 0), K(0.1, 4.50448, 0), K(0.2, 4.42118, 0), K(0.3, 4.2348, 0), K(0.4, 3.82065, 0), K(0.5, 2.19964, 0), K(0.6, 0.689516, 0), K(0.7, 0.287386, 0), K(0.8, 0.104488, 0), K(0.9, 0.0223917, 0), K(1, 0, 0) }) },
+		{ "Transparency", FADE },
+		{ "Rotation", NumberRange.new(-360, 360) },
+		{ "RotSpeed", NumberRange.new(0, 0) },
+		{ "SpreadAngle", Vector2.new(-360, 360) },
+		{ "Acceleration", Vector3.new(0, 0, 0) },
+		{ "Drag", 0 },
+		{ "EmissionDirection", Enum.NormalId.Top },
+		{ "LightEmission", -5 },
+		{ "LightInfluence", 0 },
+		{ "LockedToPart", true },
+		{ "ZOffset", 1.5 },
+		{ "Orientation", Enum.ParticleOrientation.FacingCamera },
+		{ "VelocityInheritance", 0 },
+		{ "TimeScale", 1 },
+		{ "Squash", SQUASH },
+		{ "Shape", Enum.ParticleEmitterShape.Box },
+		{ "ShapeInOut", Enum.ParticleEmitterShapeInOut.Outward },
+		{ "ShapeStyle", Enum.ParticleEmitterShapeStyle.Volume },
+		{ "ShapePartial", 1 },
+		{ "FlipbookLayout", Enum.ParticleFlipbookLayout.None },
+		{ "FlipbookMode", Enum.ParticleFlipbookMode.Loop },
+		{ "FlipbookFramerate", NumberRange.new(4.33508, 4.33508) },
+		{ "FlipbookStartRandom", false },
+		{ "Brightness", 45 },
+	} },
+	BlueFlame2 = { tint = "flame", fast = true, props = {
+		{ "Texture", "rbxassetid://15269497616" },
+		{ "Rate", 100 },
+		{ "Lifetime", NumberRange.new(0.3, 0.7) },
+		{ "Speed", NumberRange.new(80, 350) },
+		{ "Size", NumberSequence.new({ K(0, 0, 0), K(0.131902, 4.27481, 2.1), K(0.331288, 8.54962, 2.45823), K(0.720859, 11.1145, 2.28327), K(1, 11.9695, 2.08397) }) },
+		{ "Transparency", NumberSequence.new({ K(0, 0, 0), K(1, 0, 0) }) },
+		{ "Rotation", NumberRange.new(-360, 360) },
+		{ "RotSpeed", NumberRange.new(0, 0) },
+		{ "SpreadAngle", Vector2.new(360, 360) },
+		{ "Acceleration", Vector3.new(0, 0, 0) },
+		{ "Drag", 15 },
+		{ "EmissionDirection", Enum.NormalId.Front },
+		{ "LightEmission", 0 },
+		{ "LightInfluence", 0 },
+		{ "LockedToPart", true },
+		{ "ZOffset", 0 },
+		{ "Orientation", Enum.ParticleOrientation.FacingCamera },
+		{ "VelocityInheritance", 0 },
+		{ "TimeScale", 0.8 },
+		{ "Squash", SQUASH },
+		{ "Shape", Enum.ParticleEmitterShape.Box },
+		{ "ShapeInOut", Enum.ParticleEmitterShapeInOut.Outward },
+		{ "ShapeStyle", Enum.ParticleEmitterShapeStyle.Volume },
+		{ "ShapePartial", 1 },
+		{ "FlipbookLayout", Enum.ParticleFlipbookLayout.Grid4x4 },
+		{ "FlipbookMode", Enum.ParticleFlipbookMode.OneShot },
+		{ "FlipbookFramerate", NumberRange.new(1, 1) },
+		{ "FlipbookStartRandom", true },
+		{ "Brightness", 10 },
+	} },
+}
+
+local function scaleSeq(seq, k)
+	local pts = {}
+	for i, kp in ipairs(seq.Keypoints) do
+		pts[i] = K(kp.Time, kp.Value * k, kp.Envelope * k)
+	end
+	return NumberSequence.new(pts)
+end
+
+-- key = "blue" | "yellow"; scale shrinks the sprites (and the burst speed for the flame)
+local function makeEmitter(kind, key, parent, scale)
+	local d = EMIT[kind]
+	local e = Instance.new("ParticleEmitter")
+	e.Name = kind .. "_" .. key
+	for _, kv in ipairs(d.props) do
+		pcall(function() e[kv[1]] = kv[2] end)
+	end
+	pcall(function() e.Color = ColorSequence.new((PAL[key] or PAL.blue)[d.tint]) end)
+	if scale and scale ~= 1 then
+		pcall(function() e.Size = scaleSeq(e.Size, scale) end)
+		if d.fast then
+			pcall(function() e.Speed = NumberRange.new(e.Speed.Min * scale, e.Speed.Max * scale) end)
+		end
+	end
+	e.Enabled = false
+	e.Parent = parent
+	return e
+end
+
+local function pulse(e, secs)
+	e.Enabled = true
+	task.delay(secs, function()
+		if e.Parent then e.Enabled = false end
+	end)
+end
+
+-- big flash when a portal opens
+local function portalBurst(P)
+	if not (P and P.part and P.part.Parent) then return end
+	local att = Instance.new("Attachment")
+	att.Name = "PortalFX"
+	att.CFrame = CFrame.new(0, 0, -0.8)
+	att.Parent = P.part
+	pulse(makeEmitter("Flash", P.key, att, 1), 0.7)
+	pulse(makeEmitter("Flash2", P.key, att, 1), 0.5)
+	makeEmitter("BlueFlame2", P.key, att, 0.4):Emit(12)
+	Debris:AddItem(att, 3)
+end
+
+-- quick flash when something goes through a portal
+local function portalPulse(P)
+	if not (P and P.part and P.part.Parent) then return end
+	local att = Instance.new("Attachment")
+	att.Name = "PortalPulse"
+	att.CFrame = CFrame.new(0, 0, -0.8)
+	att.Parent = P.part
+	pulse(makeEmitter("Flash2", P.key, att, 0.9), 0.18)
+	pulse(makeEmitter("Flash", P.key, att, 0.8), 0.25)
+	Debris:AddItem(att, 1.5)
+end
+
+-- flash at the front of the gun (shooting / grabbing)
+local function muzzleBurst(key)
+	if not (gun and gun.muzzle and gun.muzzle.Parent) then return end
+	local list = {
+		makeEmitter("Flash2", key, gun.muzzle, 0.45),
+		makeEmitter("Flash", key, gun.muzzle, 0.4),
+		makeEmitter("BlueFlame2", key, gun.muzzle, 0.1),
+	}
+	pulse(list[1], 0.12)
+	pulse(list[2], 0.15)
+	list[3]:Emit(6)
+	for _, e in ipairs(list) do Debris:AddItem(e, 1.5) end
+end
 
 local charCache = setmetatable({}, { __mode = "k" })
 local function isCharacterPart(inst)
@@ -126,6 +306,7 @@ end
 
 local function ripple(P)
 	if not (P and P.part and P.part.Parent) then return end
+	portalPulse(P)
 	local up = TweenService:Create(P.part, TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Size = P.size * 1.15 })
 	up:Play()
 	up.Completed:Connect(function()
@@ -208,6 +389,7 @@ local function newPortal(key, hit)
 	TweenService:Create(inner, info2, { Size = Vector3.new(4.1, 1.23, 2.5) }):Play()
 	TweenService:Create(part, info2, { Size = P.size }):Play()
 	relink()
+	portalBurst(P)
 end
 
 local function castRay(origin, dir, filter)
@@ -289,6 +471,9 @@ local function fireProjectile(key, from, hit)
 		Color = ColorSequence.new(Color3.new(1, 1, 1), col.edge), Transparency = NumberSequence.new(0, 1),
 		LightEmission = 1,
 	})
+	local glow = makeEmitter("Flash2", key, part, 0.3)
+	glow.Enabled = true
+	emitters[#emitters + 1] = glow
 	local light = Instance.new("PointLight")
 	light.Color = col.main
 	light.Range = 10
@@ -326,6 +511,7 @@ local function shoot(key, screenPos)
 	local char = lp.Character
 	if not char then return end
 	lastShot = os.clock()
+	lastKey = key
 	local cam = C()
 	screenPos = screenPos or cam.ViewportSize / 2
 	local ray = cam:ViewportPointToRay(screenPos.X, screenPos.Y)
@@ -351,6 +537,7 @@ local function shoot(key, screenPos)
 		from = (hrp and hrp.Position or cam.CFrame.Position) + cam.CFrame.LookVector * 1.5
 	end
 	fireProjectile(key, from, hit)
+	muzzleBurst(key)
 	if gun and gun.cyl1 and gun.cyl1.Parent then
 		gun.cyl1.BrickColor = BrickColor.new(COLORS[key].brick)
 		gun.cyl1.Material = Enum.Material.Neon
@@ -912,16 +1099,165 @@ end))
 
 local mouse = lp:GetMouse()
 local dragger = nil
+local grabHum = nil
+local grabFX = nil
+local GRAB_RANGE = 14
+local GRAB_TEX = "rbxassetid://18463948969" -- beam texture (swap the id to restyle the beams)
+
+local function humanoidOf(part)
+	local m = part:FindFirstAncestorOfClass("Model")
+	while m do
+		local h = m:FindFirstChildOfClass("Humanoid")
+		if h then return h end
+		m = m:FindFirstAncestorOfClass("Model")
+	end
+	return nil
+end
+
+-- only real players are off limits; NPCs / dummies can be grabbed
+local function isPlayerPart(part)
+	local m = part:FindFirstAncestorOfClass("Model")
+	while m do
+		if Players:GetPlayerFromCharacter(m) then return true end
+		m = m:FindFirstAncestorOfClass("Model")
+	end
+	return false
+end
+
+local function grabbable(part)
+	if not part or not part:IsA("BasePart") or part:IsA("Terrain") then return false end
+	if part.Anchored then return false end
+	local root = part.AssemblyRootPart
+	if root and root.Anchored then return false end
+	if isPlayerPart(part) then return false end
+	return true
+end
+
+-- ray (or sphere) through the middle of the screen; unlike the portal shot it does NOT skip loose parts
+local function centerCast(extra, radius)
+	local cam = C()
+	if not cam then return nil end
+	local vp = cam.ViewportSize
+	local ray = cam:ViewportPointToRay(vp.X / 2, vp.Y / 2)
+	local rp = RaycastParams.new()
+	rp.FilterType = Enum.RaycastFilterType.Exclude
+	rp.IgnoreWater = true
+	local ign = { fxFolder }
+	if lp.Character then ign[#ign + 1] = lp.Character end
+	if dragger then ign[#ign + 1] = dragger end
+	if extra then ign[#ign + 1] = extra end
+	rp.FilterDescendantsInstances = ign
+	local dir = ray.Direction * 600
+	if radius then
+		local ok, r = pcall(function() return workspace:Spherecast(ray.Origin, radius, dir, rp) end)
+		return ok and r or nil
+	end
+	return workspace:Raycast(ray.Origin, dir, rp)
+end
+
+local function pickTarget(fromCenter, head)
+	local function good(part, pos)
+		return part and pos and grabbable(part) and (pos - head.Position).Magnitude < GRAB_RANGE
+	end
+	if not fromCenter then
+		local t = mouse.Target
+		if good(t, mouse.Hit.Position) then return t, mouse.Hit.Position end
+		return nil
+	end
+	local r = centerCast(nil, nil)
+	if r and good(r.Instance, r.Position) then return r.Instance, r.Position end
+	r = centerCast(nil, 1.5) -- forgiving aim for touch
+	if r and good(r.Instance, r.Position) then return r.Instance, r.Position end
+	return nil
+end
 
 local function ggVisible(on)
 	if not gun then return end
-	for _, p in ipairs(gun.gg) do p.Transparency = on and 0 or 1 end
+	for _, p in ipairs(gun.gg) do
+		p.Transparency = on and 0 or 1
+		if on then pcall(function() p.Color = COLORS[lastKey].edge end) end
+	end
+end
+
+local function destroyGrabFX()
+	if not grabFX then return end
+	for _, o in ipairs(grabFX.objs) do pcall(function() o:Destroy() end) end
+	grabFX = nil
+end
+
+-- three energy strands, one from each prong of the gun, that converge on the held object
+local function buildGrabFX(ball)
+	destroyGrabFX()
+	if not (gun and gun.gg) then return end
+	local key = lastKey
+	local col = COLORS[key]
+	local objs, beams = {}, {}
+
+	local endAtt = Instance.new("Attachment")
+	endAtt.Name = "GrabEnd"
+	endAtt.Parent = ball
+	objs[#objs + 1] = endAtt
+	pulse(makeEmitter("Flash2", key, endAtt, 0.6), 99999)
+	pulse(makeEmitter("Flash", key, endAtt, 0.5), 99999)
+
+	for i = 1, 3 do
+		local prong = gun.gg[3 + i]
+		if prong and prong.Parent then
+			local a0 = Instance.new("Attachment")
+			a0.Name = "GrabStart"
+			a0.Parent = prong
+			objs[#objs + 1] = a0
+
+			local b = Instance.new("Beam")
+			b.Name = "GrabBeam" .. i
+			b.Attachment0 = a0
+			b.Attachment1 = endAtt
+			b.Texture = GRAB_TEX
+			b.TextureMode = Enum.TextureMode.Wrap
+			b.TextureLength = 3
+			b.TextureSpeed = -3
+			b.Color = ColorSequence.new(col.edge, Color3.new(1, 1, 1))
+			b.Transparency = NumberSequence.new({ K(0, 0.1), K(0.5, 0.25), K(1, 0.05) })
+			b.LightEmission = 1
+			b.LightInfluence = 0
+			b.Width0 = 0.12
+			b.Width1 = 0.5
+			b.Segments = 30
+			b.FaceCamera = true
+			b.Parent = prong
+			objs[#objs + 1] = b
+			beams[#beams + 1] = { beam = b, phase = i * 2.1 }
+		end
+	end
+	grabFX = { objs = objs, beams = beams, t0 = os.clock() }
+end
+
+local function animateGrabFX()
+	if not grabFX then return end
+	local t = os.clock() - grabFX.t0
+	for _, s in ipairs(grabFX.beams) do
+		local w = math.sin(t * 5 + s.phase)
+		pcall(function()
+			s.beam.CurveSize0 = w * 1.2
+			s.beam.CurveSize1 = -w * 1.2
+			s.beam.Width1 = 0.5 + 0.08 * math.sin(t * 9 + s.phase)
+		end)
+	end
 end
 
 releaseGrab = function()
 	holding = false
 	if dragger then dragger:Destroy() dragger = nil end
+	destroyGrabFX()
 	pcall(function() mouse.TargetFilter = nil end)
+	if grabHum then
+		local g = grabHum
+		grabHum = nil
+		pcall(function()
+			g.hum.PlatformStand = g.ps
+			if not g.ps then g.hum:ChangeState(Enum.HumanoidStateType.GettingUp) end
+		end)
+	end
 	if gun and gun.grav then gun.grav:Stop() end
 	ggVisible(false)
 	setGrabTitle()
@@ -929,42 +1265,44 @@ releaseGrab = function()
 end
 
 startGrab = function(fromCenter)
+	if holding then return end
 	local char = lp.Character
 	local head = char and char:FindFirstChild("Head")
-	local cam = C()
-	local function centerHit(extra)
-		if not cam then return nil end
-		local vp = cam.ViewportSize
-		local ray = cam:ViewportPointToRay(vp.X / 2, vp.Y / 2)
-		local ign = { char, fxFolder }
-		if extra then ign[#ign + 1] = extra end
-		return castRay(ray.Origin, ray.Direction * 600, ign)
-	end
-	local target, hitPos
-	if fromCenter then
-		local r = centerHit()
-		target = r and r.Instance
-		hitPos = r and r.Position
-	else
-		target = mouse.Target
-		hitPos = mouse.Hit.Position
-	end
-	if not (head and target) or target.Anchored or isCharacterPart(target) then return end
-	if (hitPos - head.Position).Magnitude >= 10 then return end
+	if not head then return end
+	local target, hitPos = pickTarget(fromCenter, head)
+	if not target then return end
+
 	holding = true
+	claimNetwork()
 	if gun then gun.grav:Play() end
 	ggVisible(true)
+	muzzleBurst(lastKey)
+
+	-- NPCs: stop their balance / get-up logic from fighting the drag
+	local hum = humanoidOf(target)
+	if hum then
+		grabHum = { hum = hum, ps = hum.PlatformStand }
+		pcall(function() hum.PlatformStand = true end)
+		pcall(function() hum:ChangeState(Enum.HumanoidStateType.Physics) end)
+	end
+
+	local mass = 1
+	pcall(function() mass = math.max(target.AssemblyMass, 1) end)
+	local force = math.max(40000, mass * workspace.Gravity * 6)
+	local torque = math.max(3000, mass * 300)
 
 	local ball = Instance.new("Part")
 	ball.Name = "DragBall"
 	ball.Transparency = 1
 	ball.CanCollide = false
+	ball.CanQuery = false
+	ball.CanTouch = false
 	ball.Size = Vector3.new(.2, .2, .2)
 	ball.Shape = Enum.PartType.Ball
 	ball.CFrame = CFrame.new(hitPos)
 	ball.Parent = workspace
 	dragger = ball
-	mouse.TargetFilter = target
+	pcall(function() mouse.TargetFilter = target end)
 	setGrabTitle()
 
 	local weld = Instance.new("ManualWeld", ball)
@@ -974,33 +1312,43 @@ startGrab = function(fromCenter)
 
 	local mover = Instance.new("BodyPosition")
 	mover.Name = "Mover"
-	mover.MaxForce = Vector3.new(40000, 40000, 40000)
+	mover.MaxForce = Vector3.new(force, force, force)
 	mover.P = 40000
 	mover.D = 1000
 	mover.Position = ball.Position
 	mover.Parent = ball
 	local rot = Instance.new("BodyGyro")
 	rot.Name = "RotMover"
-	rot.MaxTorque = Vector3.new(3000, 3000, 3000)
+	rot.MaxTorque = Vector3.new(torque, torque, torque)
 	rot.P = 3000
 	rot.D = 500
 	rot.CFrame = C().CFrame
 	rot.Parent = ball
 
+	buildGrabFX(ball)
 	hud()
 	task.spawn(function()
+		local lastClaim = os.clock()
 		while dragger == ball and ball.Parent do
 			local h = lp.Character and lp.Character:FindFirstChild("Head")
-			if not h then break end
-			local aim = mouse.Hit.Position
+			if not h or not target.Parent then break end
+			local cam = C()
+			local aim
 			if fromCenter then
-				local r = centerHit(target)
-				local cl = cam and cam.CFrame
-				aim = r and r.Position or (cl and cl.Position + cl.LookVector * 100) or aim
+				local r = centerCast(target, nil)
+				aim = r and r.Position or (cam.CFrame.Position + cam.CFrame.LookVector * 100)
+			else
+				aim = mouse.Hit.Position
 			end
+			if (aim - h.Position).Magnitude < 0.1 then aim = h.Position + cam.CFrame.LookVector end
 			local cf = CFrame.new(h.Position, aim)
 			mover.Position = (cf + cf.LookVector * 10).Position
-			rot.CFrame = C().CFrame
+			rot.CFrame = cam.CFrame
+			animateGrabFX()
+			if os.clock() - lastClaim > 0.5 then
+				lastClaim = os.clock()
+				claimNetwork()
+			end
 			task.wait()
 		end
 		if dragger == ball then releaseGrab() end
@@ -1126,7 +1474,12 @@ local function buildTool(rig)
 	local click = Instance.new("Sound", handle)
 	click.SoundId = SND_CLICK
 
-	gun = { handle = handle, cyl1 = cylinder1, cyl2 = cylinder2, gg = gg, light = light, click = click, grav = grav }
+	local muzzle = Instance.new("Attachment")
+	muzzle.Name = "Muzzle"
+	muzzle.Position = Vector3.new(0, -0.1, -2.3)
+	muzzle.Parent = handle
+
+	gun = { handle = handle, cyl1 = cylinder1, cyl2 = cylinder2, gg = gg, light = light, click = click, grav = grav, muzzle = muzzle }
 
 	t.Equipped:Connect(function()
 		equipped = true
