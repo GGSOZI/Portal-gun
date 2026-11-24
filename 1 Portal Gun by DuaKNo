@@ -684,7 +684,6 @@ track(RunService.Heartbeat:Connect(function()
 		end
 	end
 
-	if os.clock() - lastTP < 0.4 then return end
 	for _, pair in ipairs({ { b, y }, { y, b } }) do
 		local P, Q = pair[1], pair[2]
 		if P ~= exitP then
@@ -1519,7 +1518,6 @@ local function giveTool()
 			clearPortals()
 			pcall(function() if tool then tool:Destroy() end end)
 		end)
-		pcall(function() hum:EquipTool(tool) end)
 	end
 	hud()
 end
