@@ -1,0 +1,1192 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local InsertService = game:GetService("InsertService")
+local SoundService = game:GetService("SoundService")
+local ContextActionService = game:GetService("ContextActionService")
+local Debris = game:GetService("Debris")
+local lp = Players.LocalPlayer
+
+if _G.PortalGunCleanup then pcall(_G.PortalGunCleanup) end
+
+local conns = {}
+local function track(c) conns[#conns + 1] = c return c end
+local function C() return workspace.CurrentCamera end
+
+local PW, PH = 4.6, 7.6
+local COLORS = {
+	blue   = { main = BrickColor.new("Bright blue").Color, edge = Color3.fromRGB(65, 222, 253), shoot = "rbxassetid://182981554", brick = "Bright blue" },
+	yellow = { main = BrickColor.new("Neon orange").Color, edge = Color3.fromRGB(255, 225, 58), shoot = "rbxassetid://142774034", brick = "Neon orange" },
+}
+local SND_IDLE, SND_OPEN, SND_FIZZLE = "rbxassetid://148894502", "rbxassetid://171399373", "rbxassetid://182981587"
+local SND_TELEPORT = { "rbxassetid://232806289", "rbxassetid://2769872789" }
+local SND_EXECUTE = "rbxassetid://2765274358"
+local SND_GRAVITY, SND_CLICK = "rbxassetid://7449423195", "rbxassetid://5991592592"
+local ROT = CFrame.Angles(0, math.pi, 0)
+
+local MOMENTUM_GAIN = 0.3
+local MOMENTUM_MAX = 4
+local MOMENTUM_WINDOW = 3
+local MIN_OUT_VERT = 16
+local MIN_OUT_WALL = 12
+local SIM_RADIUS = 2000
+local MAX_SPEED = 220
+local PROJ_SPEED = 380
+local ANTI_FALL = true
+local FALL_SAFE = 38
+
+local fxFolder = Instance.new("Folder")
+fxFolder.Name = "PortalGunFX"
+fxFolder.Parent = workspace
+
+local portals = { blue = nil, yellow = nil }
+local equipped = false
+local holding = false
+local tool, gun
+local releaseGrab, startGrab
+local lastShot, lastTP = 0, 0
+local boost = 1
+local exitP = nil
+local hud
+
+local function playSound(id, speed, vol)
+	local s = Instance.new("Sound")
+	s.SoundId = id
+	s.Volume = vol or 0.6
+	s.PlaybackSpeed = speed or 1
+	s.Parent = SoundService
+	s:Play()
+	Debris:AddItem(s, 6)
+end
+
+local function playEnter()
+	playSound(SND_TELEPORT[math.random(1, #SND_TELEPORT)], 1, 0.5)
+end
+
+warn("'Speedy thing goes in, speedy thing comes out.'")
+warn("Controls: LMB: Blue Portal | RMB: Orange Portal | R: Reset Portals | F: Flashlight | E: Grab Unanchored Parts (or use the on-screen buttons)")
+do
+	local ex = Instance.new("Sound")
+	ex.Name = "GLaDOS was here"
+	ex.SoundId = SND_EXECUTE
+	ex.Parent = workspace
+	ex:Play()
+	Debris:AddItem(ex, 30)
+end
+
+local function otherOf(key) return key == "blue" and portals.yellow or portals.blue end
+
+local function darkOf(col) return col:Lerp(Color3.new(0, 0, 0), 0.9) end
+
+local charCache = setmetatable({}, { __mode = "k" })
+local function isCharacterPart(inst)
+	local cached = charCache[inst]
+	if cached ~= nil then return cached end
+	local result = false
+	local m = inst:FindFirstAncestorOfClass("Model")
+	while m do
+		if m:FindFirstChildOfClass("Humanoid") then result = true break end
+		m = m:FindFirstAncestorOfClass("Model")
+	end
+	charCache[inst] = result
+	return result
+end
+
+local function relink()
+	local both = portals.blue and portals.yellow
+	for key, P in pairs(portals) do
+		P.inner.BrickColor = BrickColor.new(both and "Really black" or COLORS[key].brick)
+	end
+	if hud then hud() end
+end
+
+local function resetGunColors()
+	if gun and gun.cyl1 and gun.cyl1.Parent then
+		gun.cyl1.Material = Enum.Material.SmoothPlastic
+		gun.cyl1.Color = Color3.fromRGB(50, 50, 50)
+		gun.cyl2.BrickColor = BrickColor.new("Really black")
+	end
+end
+
+local function removePortal(key)
+	local P = portals[key]
+	if not P then return end
+	portals[key] = nil
+	if exitP == P then exitP = nil end
+	P.part:Destroy()
+end
+
+local function clearPortals()
+	removePortal("blue")
+	removePortal("yellow")
+	resetGunColors()
+	relink()
+end
+
+local function ripple(P)
+	if not (P and P.part and P.part.Parent) then return end
+	local up = TweenService:Create(P.part, TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Size = P.size * 1.15 })
+	up:Play()
+	up.Completed:Connect(function()
+		if P.part.Parent then
+			TweenService:Create(P.part, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.In), { Size = P.size }):Play()
+		end
+	end)
+end
+
+local function newPortal(key, hit)
+	local n = hit.Normal
+	local pos = hit.Position + n * 0.05
+	local up = Vector3.yAxis
+	if math.abs(n.Y) > 0.9 then
+		local look = C().CFrame.LookVector
+		local flat = Vector3.new(look.X, 0, look.Z)
+		up = flat.Magnitude > 0.05 and flat.Unit or Vector3.xAxis
+	end
+	local cf = CFrame.lookAt(pos, pos + n, up)
+	local col = COLORS[key]
+	local info2 = TweenInfo.new(0.333, Enum.EasingStyle.Circular, Enum.EasingDirection.Out)
+
+	removePortal(key)
+
+	local part = Instance.new("Part")
+	part.Name = (key == "blue") and "Blue1" or "Orange2"
+	part.Anchored = true
+	part.CanCollide = false
+	part.CanQuery = false
+	part.CanTouch = false
+	part.CastShadow = false
+	part.Size = Vector3.new(.7, .7, .7)
+	part.CFrame = cf
+	part.BrickColor = BrickColor.new(col.brick)
+	part.Material = Enum.Material.Neon
+	local sp = Instance.new("SpecialMesh", part)
+	sp.MeshType = Enum.MeshType.Sphere
+	sp.Scale = Vector3.new(1, 1.33, 0.05)
+	sp.Offset = Vector3.new(0, 0, -0.02)
+
+	local idle = Instance.new("Sound", part)
+	idle.SoundId = SND_IDLE
+	idle.Looped = true
+	idle.Volume = 0.2
+	local fizzle = Instance.new("Sound", part)
+	fizzle.SoundId = SND_FIZZLE
+	fizzle.Volume = 0.35
+	fizzle.PlayOnRemove = true
+	local open = Instance.new("Sound", part)
+	open.SoundId = SND_OPEN
+	open.RollOffMinDistance = 30
+	open.Volume = 0.6
+
+	local inner = Instance.new("Part", part)
+	inner.Name = "Inner"
+	inner.Size = Vector3.new(.5, .5, .5)
+	inner.Anchored = true
+	inner.CanCollide = false
+	inner.CanQuery = false
+	inner.CanTouch = false
+	inner.CastShadow = false
+	inner.BrickColor = BrickColor.new(col.brick)
+	inner.Material = Enum.Material.Neon
+	inner.CFrame = cf
+	local im = Instance.new("SpecialMesh", inner)
+	im.MeshType = Enum.MeshType.Sphere
+	im.Scale = Vector3.new(1.1, 6, .05)
+	im.Offset = Vector3.new(0, 0, -0.02)
+
+	local hl = Instance.new("Highlight", part)
+	hl.FillTransparency = 1
+	hl.OutlineColor = col.edge
+
+	part.Parent = fxFolder
+	open:Play()
+	idle:Play()
+
+	local P = { key = key, part = part, inner = inner, size = Vector3.new(5, 6, 1) }
+	portals[key] = P
+	TweenService:Create(inner, info2, { Size = Vector3.new(4.1, 1.23, 2.5) }):Play()
+	TweenService:Create(part, info2, { Size = P.size }):Play()
+	relink()
+end
+
+local function castRay(origin, dir, filter)
+	for _, pl in ipairs(Players:GetPlayers()) do
+		if pl.Character then filter[#filter + 1] = pl.Character end
+	end
+	local rp = RaycastParams.new()
+	rp.FilterType = Enum.RaycastFilterType.Exclude
+	rp.IgnoreWater = true
+	rp.FilterDescendantsInstances = filter
+	for _ = 1, 20 do
+		local hit = workspace:Raycast(origin, dir, rp)
+		if not hit then return nil end
+		local inst = hit.Instance
+		local isTerrain = inst:IsA("Terrain")
+		local root = (not isTerrain) and inst.AssemblyRootPart or nil
+		local moving = (not isTerrain) and not inst.Anchored and not (root and root.Anchored)
+		if moving or (not inst.CanCollide and not isTerrain) then
+			filter[#filter + 1] = inst
+			rp.FilterDescendantsInstances = filter
+		else
+			return hit
+		end
+	end
+	return nil
+end
+
+local function overlapsPortal(o, hit)
+	local ocf = o.part.CFrame
+	local n = hit.Normal
+	local pos = hit.Position
+	if math.abs(n.Y) < 0.9 and ocf.LookVector:Dot(n) > 0.9 and math.abs(ocf.LookVector:Dot(pos - ocf.Position)) < 0.6 then
+		local lc = ocf:PointToObjectSpace(pos)
+		local nx, ny = lc.X / (PW + 0.4), lc.Y / (PH + 0.4)
+		return nx * nx + ny * ny < 1
+	end
+	return (o.part.Position - pos).Magnitude < ((math.abs(n.Y) >= 0.9) and 6 or 5.5)
+end
+
+local projectiles = {}
+
+local function fireProjectile(key, from, hit)
+	local col = COLORS[key]
+	local goal = hit.Position + hit.Normal * 0.06
+	local dur = math.clamp((goal - from).Magnitude / PROJ_SPEED, 0.04, 1.6)
+
+	local part = Instance.new("Part")
+	part.Name = "PortalShot_" .. key
+	part.Anchored = true
+	part.CanCollide = false
+	part.CanQuery = false
+	part.CanTouch = false
+	part.CastShadow = false
+	part.Transparency = 1
+	part.Size = Vector3.new(0.4, 0.4, 0.4)
+	part.Position = from
+	part.Parent = fxFolder
+
+	local emitters = {}
+	local function emitter(cfg)
+		local e = Instance.new("ParticleEmitter")
+		for k, v in pairs(cfg) do pcall(function() e[k] = v end) end
+		pcall(function() e.LockedToPart = false end)
+		pcall(function() e.LightInfluence = 0 end)
+		e.Parent = part
+		emitters[#emitters + 1] = e
+	end
+	emitter({
+		Texture = "http://www.roblox.com/asset/?id=5192965045",
+		Rate = 120, Lifetime = NumberRange.new(0.2, 0.32), Speed = NumberRange.new(0, 0),
+		Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, 1.8), NumberSequenceKeypoint.new(1, 0) }),
+		Color = ColorSequence.new(col.edge, col.main), Transparency = NumberSequence.new(0, 1),
+		LightEmission = 1, Brightness = 4, ZOffset = 1, Rotation = NumberRange.new(0, 360),
+	})
+	emitter({
+		Rate = 70, Lifetime = NumberRange.new(0.25, 0.5), Speed = NumberRange.new(2, 9),
+		SpreadAngle = Vector2.new(180, 180),
+		Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.5), NumberSequenceKeypoint.new(1, 0) }),
+		Color = ColorSequence.new(Color3.new(1, 1, 1), col.edge), Transparency = NumberSequence.new(0, 1),
+		LightEmission = 1,
+	})
+	local light = Instance.new("PointLight")
+	light.Color = col.main
+	light.Range = 10
+	light.Brightness = 3
+	light.Parent = part
+
+	playSound(col.shoot, 1, 0.5)
+	projectiles[#projectiles + 1] = {
+		part = part, from = from, goal = goal, dur = dur, t = 0,
+		land = function()
+			for _, e in ipairs(emitters) do pcall(function() e.Enabled = false end) end
+			light:Destroy()
+			Debris:AddItem(part, 0.8)
+			local o = otherOf(key)
+			if not (o and overlapsPortal(o, hit)) then newPortal(key, hit) end
+		end,
+	}
+end
+
+track(RunService.Heartbeat:Connect(function(dt)
+	for i = #projectiles, 1, -1 do
+		local pr = projectiles[i]
+		pr.t += dt
+		local a = math.min(pr.t / pr.dur, 1)
+		if pr.part.Parent then pr.part.Position = pr.from:Lerp(pr.goal, a) end
+		if a >= 1 then
+			table.remove(projectiles, i)
+			pr.land()
+		end
+	end
+end))
+
+local function shoot(key, screenPos)
+	if not equipped or holding or os.clock() - lastShot < 0.25 then return end
+	local char = lp.Character
+	if not char then return end
+	lastShot = os.clock()
+	local cam = C()
+	screenPos = screenPos or cam.ViewportSize / 2
+	local ray = cam:ViewportPointToRay(screenPos.X, screenPos.Y)
+	local hit = castRay(ray.Origin, ray.Direction * 600, { char, fxFolder })
+
+	local bad, onPortal = not hit, false
+	if hit then
+		local head = char:FindFirstChild("Head")
+		if head and (hit.Position - head.Position).Magnitude < 2 then bad = true end
+		if isCharacterPart(hit.Instance) then bad = true end
+		local o = otherOf(key)
+		if o and overlapsPortal(o, hit) then
+			bad = true
+			onPortal = true
+		end
+	end
+	if bad then return end
+	local hrp = char:FindFirstChild("HumanoidRootPart")
+	local from
+	if gun and gun.cyl1 and gun.cyl1.Parent then
+		from = (gun.cyl1.CFrame * CFrame.new(0, 0, -2.7)).Position
+	else
+		from = (hrp and hrp.Position or cam.CFrame.Position) + cam.CFrame.LookVector * 1.5
+	end
+	fireProjectile(key, from, hit)
+	if gun and gun.cyl1 and gun.cyl1.Parent then
+		gun.cyl1.BrickColor = BrickColor.new(COLORS[key].brick)
+		gun.cyl1.Material = Enum.Material.Neon
+		gun.cyl2.BrickColor = BrickColor.new(COLORS[key].brick)
+	end
+end
+
+local r6 = {}
+local function armPitch()
+	return math.clamp(math.asin(math.clamp(C().CFrame.LookVector.Y, -1, 1)), -1.3, 1.3)
+end
+local function armR6()
+	local char = lp.Character
+	local torso = char and char:FindFirstChild("Torso")
+	local rs = torso and torso:FindFirstChild("Right Shoulder")
+	local ls = torso and torso:FindFirstChild("Left Shoulder")
+	local nk = torso and torso:FindFirstChild("Neck")
+	if not (rs and ls and nk) then return end
+	if r6.rs ~= rs then r6 = { rs = rs, ls = ls, nk = nk, rs0 = rs.C0, ls0 = ls.C0, nk0 = nk.C0 } end
+	if equipped then
+		local p = armPitch()
+		rs.C0 = rs.C0:Lerp(CFrame.new(1, .65, 0) * CFrame.Angles(p, 1.55, 0), 0.1)
+		ls.C0 = ls.C0:Lerp(CFrame.new(-1, .65, 0) * CFrame.Angles(p, -1.55, 0), 0.1)
+		nk.C0 = nk.C0:Lerp(CFrame.new(0, 1, 0) * CFrame.Angles(p + 1.55, 3.15, 0), 0.2)
+	else
+		rs.C0 = rs.C0:Lerp(r6.rs0, 0.1)
+		ls.C0 = ls.C0:Lerp(r6.ls0, 0.1)
+		nk.C0 = nk.C0:Lerp(r6.nk0, 0.2)
+	end
+end
+local function armR15()
+	if not equipped then return end
+	local char = lp.Character
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	local ua = char and char:FindFirstChild("RightUpperArm")
+	local rsh = ua and ua:FindFirstChild("RightShoulder")
+	if not (hrp and rsh) then return end
+	local rootCFrame = hrp.CFrame
+	local rotationOffset = (rootCFrame - rootCFrame.Position):Inverse()
+	rsh.Transform = rotationOffset * CFrame.new(Vector3.zero, C().CFrame.LookVector * 5000) * CFrame.Angles(math.pi / 2, 0, 0)
+end
+local function armUpdate(stepped)
+	local hum = lp.Character and lp.Character:FindFirstChildOfClass("Humanoid")
+	if not hum then return end
+	if hum.RigType == Enum.HumanoidRigType.R15 then
+		if stepped then armR15() end
+	elseif not stepped then
+		armR6()
+	end
+end
+track(RunService.Stepped:Connect(function() pcall(armUpdate, true) end))
+track(RunService.RenderStepped:Connect(function() pcall(armUpdate, false) end))
+
+local fallRP = RaycastParams.new()
+fallRP.FilterType = Enum.RaycastFilterType.Exclude
+
+local function softLanding(hrp)
+	if not ANTI_FALL then return end
+	local v = hrp.AssemblyLinearVelocity
+	if v.Y > -FALL_SAFE then return end
+	fallRP.FilterDescendantsInstances = { lp.Character, fxFolder }
+	if not workspace:Raycast(hrp.Position, Vector3.new(0, -14, 0), fallRP) then return end
+	for _, P in pairs(portals) do
+		local pcf = P.part.CFrame
+		if pcf.LookVector.Y > 0.7 then
+			local lc = pcf:PointToObjectSpace(hrp.Position)
+			if math.abs(lc.X) < PW / 2 + 0.8 and math.abs(lc.Y) < PH / 2 + 0.8 and lc.Z < 0 then return end
+		end
+	end
+	hrp.AssemblyLinearVelocity = Vector3.new(v.X, -FALL_SAFE, v.Z)
+end
+
+local function teleport(P, Q, hrp)
+	local pcf, qcf = P.part.CFrame, Q.part.CFrame
+	local lcf = pcf:ToObjectSpace(hrp.CFrame)
+	local qn = qcf.LookVector
+	local qVert = math.abs(qn.Y) > 0.7
+	local push = qVert and 3.4 or 2.6
+	local ly = lcf.Position.Y
+	if not qVert then ly = math.clamp(ly, -2, 2) end
+	local newCF = qcf * ROT * CFrame.new(lcf.Position.X, ly, push) * (lcf - lcf.Position)
+
+	local look = newCF.LookVector
+	local flat = Vector3.new(look.X, 0, look.Z)
+	if flat.Magnitude < 0.2 then
+		local ol = hrp.CFrame.LookVector
+		flat = Vector3.new(ol.X, 0, ol.Z)
+	end
+	if flat.Magnitude < 0.05 then flat = Vector3.new(0, 0, -1) end
+	local pos = newCF.Position
+
+	if qn.Y > -0.7 then
+		local rp = RaycastParams.new()
+		rp.FilterType = Enum.RaycastFilterType.Exclude
+		rp.FilterDescendantsInstances = { lp.Character, fxFolder }
+		local g = workspace:Raycast(pos + Vector3.new(0, 2, 0), Vector3.new(0, -10, 0), rp)
+		if g and pos.Y - 3 < g.Position.Y then pos = Vector3.new(pos.X, g.Position.Y + 3, pos.Z) end
+	end
+
+	if os.clock() - lastTP < MOMENTUM_WINDOW then
+		boost = math.min(boost + MOMENTUM_GAIN, MOMENTUM_MAX)
+	else
+		boost = 1
+	end
+
+	local v = hrp.AssemblyLinearVelocity
+	local nv = qcf:VectorToWorldSpace(ROT:VectorToWorldSpace(pcf:VectorToObjectSpace(v)))
+	local out = nv:Dot(qn)
+	local pVert = math.abs(pcf.LookVector.Y) > 0.7
+	if qVert then
+		local speed = math.clamp(math.max(out, MIN_OUT_VERT) * boost, 0, MAX_SPEED)
+		local lateral = pVert and Vector3.new(v.X, 0, v.Z) or (nv - qn * out)
+		nv = lateral + qn * speed
+	else
+		if out < MIN_OUT_WALL then nv = nv + qn * (MIN_OUT_WALL - out) end
+		nv = nv * boost
+	end
+	if nv.Magnitude > MAX_SPEED then nv = nv.Unit * MAX_SPEED end
+
+	hrp.CFrame = CFrame.lookAt(pos, pos + flat.Unit)
+	hrp.AssemblyLinearVelocity = nv
+	hrp.AssemblyAngularVelocity = Vector3.zero
+
+	playEnter(Q.key)
+	ripple(P)
+	ripple(Q)
+end
+
+track(RunService.Heartbeat:Connect(function()
+
+	local char = lp.Character
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	if hrp then pcall(softLanding, hrp) end
+	local b, y = portals.blue, portals.yellow
+	if not (hrp and hum and b and y) then exitP = nil return end
+
+	if exitP then
+		local lc = exitP.part.CFrame:PointToObjectSpace(hrp.Position)
+		local vertical = math.abs(exitP.part.CFrame.LookVector.Y) > 0.7
+		if math.abs(lc.X) > PW / 2 + 0.5 or math.abs(lc.Y) > PH / 2 + 0.5
+			or -lc.Z > (vertical and 5 or 3.2) or lc.Z > 1 then
+			exitP = nil
+		end
+	end
+
+	if os.clock() - lastTP < 0.4 then return end
+	for _, pair in ipairs({ { b, y }, { y, b } }) do
+		local P, Q = pair[1], pair[2]
+		if P ~= exitP then
+			local pcf = P.part.CFrame
+			local lc = pcf:PointToObjectSpace(hrp.Position)
+			local d = -lc.Z
+			if math.abs(lc.X) < PW / 2 and math.abs(lc.Y) < PH / 2 and d > -0.3 then
+				local n = pcf.LookVector
+				local vn = hrp.AssemblyLinearVelocity:Dot(n)
+				local trig
+				if n.Y > 0.7 then
+					trig = d < 3.6
+				elseif n.Y < -0.7 then
+					trig = d < 3.6 and vn < -2
+				else
+					trig = d < 2.4 and (vn < -2 or hum.MoveDirection:Dot(n) < -0.25)
+				end
+				if trig then
+					teleport(P, Q, hrp)
+					lastTP = os.clock()
+					exitP = Q
+					return
+				end
+			end
+		end
+	end
+end))
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "PortalGunUI"
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+gui.DisplayOrder = 50
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+do
+	local ok, h = pcall(function() return gethui and gethui() end)
+	gui.Parent = (ok and h) or lp:WaitForChild("PlayerGui")
+end
+
+local cross = Instance.new("Frame")
+cross.Name = "Frame"
+cross.AnchorPoint = Vector2.new(0.5, 0.5)
+cross.BackgroundTransparency = 1
+cross.BorderSizePixel = 0
+cross.Position = UDim2.fromScale(0.5, 0.5)
+cross.Size = UDim2.fromScale(0.063, 0.115)
+cross.Interactable = false
+cross.Visible = false
+cross.Parent = gui
+Instance.new("UIAspectRatioConstraint").Parent = cross
+
+local states = {}
+for name, img in pairs({
+	OnlyOrange = "rbxassetid://13683371140",
+	OnlyBlue = "rbxassetid://13683350503",
+	NoPortals = "rbxassetid://13683282532",
+	BothPortals = "rbxassetid://13683216197",
+}) do
+	local l = Instance.new("ImageLabel")
+	l.Name = name
+	l.AnchorPoint = Vector2.new(0.5, 0.5)
+	l.BackgroundTransparency = 1
+	l.BorderSizePixel = 0
+	l.Position = UDim2.fromScale(0.5, 0.5)
+	l.Size = UDim2.fromScale(1, 1)
+	l.Image = img
+	l.ScaleType = Enum.ScaleType.Fit
+	l.Interactable = false
+	l.Visible = false
+	l.Parent = cross
+	states[name] = l
+end
+
+hud = function()
+	local b, y = portals.blue ~= nil, portals.yellow ~= nil
+	cross.Visible = equipped and not holding
+	states.NoPortals.Visible = not b and not y
+	states.OnlyBlue.Visible = b and not y
+	states.OnlyOrange.Visible = y and not b
+	states.BothPortals.Visible = b and y
+end
+
+local function claimNetwork()
+	pcall(function() if sethiddenproperty then sethiddenproperty(lp, "SimulationRadius", SIM_RADIUS) end end)
+	pcall(function() lp.MaximumSimulationRadius = SIM_RADIUS end)
+	pcall(function() if setsimulationradius then setsimulationradius(SIM_RADIUS, SIM_RADIUS) end end)
+end
+
+local function ownsPart(root)
+	if isnetworkowner then
+		local ok, r = pcall(isnetworkowner, root)
+		if ok then return r end
+	end
+	return true
+end
+
+local function partTriggers(P, root)
+	local pcf = P.part.CFrame
+	local lc = pcf:PointToObjectSpace(root.Position)
+	if math.abs(lc.X) >= PW / 2 or math.abs(lc.Y) >= PH / 2 then return false end
+	local n = pcf.LookVector
+	local r, sz = root.CFrame, root.Size
+	local ext = (math.abs(r.RightVector:Dot(n)) * sz.X + math.abs(r.UpVector:Dot(n)) * sz.Y + math.abs(r.LookVector:Dot(n)) * sz.Z) / 2
+	local d = -lc.Z
+	if d < -0.5 then return false end
+	local vn = root.AssemblyLinearVelocity:Dot(n)
+	if n.Y > 0.7 then
+		return d < ext + 2.6
+	elseif n.Y < -0.7 then
+		return d < ext + 2.6 and vn < -1
+	end
+	return d < ext + 1.4 and vn < -1.5
+end
+
+local function teleportPart(P, Q, root)
+	local pcf, qcf = P.part.CFrame, Q.part.CFrame
+	local lcf = pcf:ToObjectSpace(root.CFrame)
+	local qn = qcf.LookVector
+	local qVert = math.abs(qn.Y) > 0.7
+	local ext = math.max(root.Size.Magnitude / 2, 1)
+	local push = ext + (qVert and 1.2 or 0.8)
+	local ly = lcf.Position.Y
+	if not qVert then ly = math.clamp(ly, -2, 2) end
+	local newCF = qcf * ROT * CFrame.new(lcf.Position.X, ly, push) * (lcf - lcf.Position)
+
+	local model = root:FindFirstAncestorOfClass("Model")
+	local hum = model and model:FindFirstChildOfClass("Humanoid")
+	if hum then
+		local lk = newCF.LookVector
+		local flat = Vector3.new(lk.X, 0, lk.Z)
+		if flat.Magnitude < 0.2 then
+			local ol = root.CFrame.LookVector
+			flat = Vector3.new(ol.X, 0, ol.Z)
+		end
+		if flat.Magnitude < 0.05 then flat = Vector3.new(0, 0, -1) end
+		newCF = CFrame.lookAt(newCF.Position, newCF.Position + flat.Unit)
+	end
+
+	if qn.Y > -0.7 then
+		local rp = RaycastParams.new()
+		rp.FilterType = Enum.RaycastFilterType.Exclude
+		rp.FilterDescendantsInstances = { fxFolder, model or root }
+		local pos = newCF.Position
+		local g = workspace:Raycast(pos + Vector3.new(0, 2, 0), Vector3.new(0, -10, 0), rp)
+		if g and pos.Y - ext < g.Position.Y then
+			newCF = newCF + Vector3.new(0, (g.Position.Y + ext) - pos.Y, 0)
+		end
+	end
+
+	local v = root.AssemblyLinearVelocity
+	local nv = qcf:VectorToWorldSpace(ROT:VectorToWorldSpace(pcf:VectorToObjectSpace(v)))
+	local out = nv:Dot(qn)
+	local minOut = qVert and 10 or 8
+	if out < minOut then nv = nv + qn * (minOut - out) end
+	if nv.Magnitude > MAX_SPEED then nv = nv.Unit * MAX_SPEED end
+
+	root.CFrame = newCF
+	root.AssemblyLinearVelocity = nv
+	root.AssemblyAngularVelocity = Vector3.zero
+end
+
+local objOP = OverlapParams.new()
+objOP.FilterType = Enum.RaycastFilterType.Exclude
+local objLock = setmetatable({}, { __mode = "k" })
+local objAcc, fxAcc = 0, 0
+
+track(RunService.Heartbeat:Connect(function(dt)
+	if portals.blue and portals.yellow then claimNetwork() end
+	objAcc += dt
+	fxAcc += dt
+	if objAcc < 0.05 then return end
+	objAcc = 0
+	local b, y = portals.blue, portals.yellow
+	if not (b and y) then return end
+
+	for root, L in pairs(objLock) do
+		if not root.Parent or not L.part.Parent then
+			objLock[root] = nil
+		else
+			local lc = L.part.CFrame:PointToObjectSpace(root.Position)
+			local vertical = math.abs(L.part.CFrame.LookVector.Y) > 0.7
+			if math.abs(lc.X) > PW / 2 + 0.8 or math.abs(lc.Y) > PH / 2 + 0.8
+				or -lc.Z > (vertical and 6 or 4) or lc.Z > 1 then
+				objLock[root] = nil
+			end
+		end
+	end
+
+	local ex = { fxFolder }
+	for _, pl in ipairs(Players:GetPlayers()) do
+		if pl.Character then ex[#ex + 1] = pl.Character end
+	end
+	objOP.FilterDescendantsInstances = ex
+
+	local seen, moved = {}, 0
+	for _, pair in ipairs({ { b, y }, { y, b } }) do
+		local P, Q = pair[1], pair[2]
+		local ok, parts = pcall(function()
+			return workspace:GetPartBoundsInBox(P.part.CFrame * CFrame.new(0, 0, -2.8), Vector3.new(PW + 1, PH + 1, 6), objOP)
+		end)
+		if ok then
+			for _, p in ipairs(parts) do
+				if moved >= 6 then break end
+				if not p:IsA("Terrain") and not p.Anchored then
+					local root = p.AssemblyRootPart
+					if root and not root.Anchored and not seen[root] then
+						seen[root] = true
+						local lock = objLock[root]
+						if not (lock and lock == P) and partTriggers(P, root) and ownsPart(root) then
+							local okT = pcall(teleportPart, P, Q, root)
+							if okT then
+								objLock[root] = Q
+								moved += 1
+								if fxAcc > 0.2 then
+									fxAcc = 0
+									ripple(P)
+									ripple(Q)
+								end
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+end))
+
+local ACT_YELLOW, ACT_BLUE, ACT_REMOVE = "PortalGun_Yellow", "PortalGun_Blue", "PortalGun_Remove"
+local buttonsBound = false
+local buttonsToken = 0
+
+local buttonConns = {}
+local SLOT_OF = { [ACT_YELLOW] = "yellow", [ACT_BLUE] = "blue", [ACT_REMOVE] = "remove" }
+
+local function buttonSize(vp)
+	return math.clamp(math.floor(math.min(vp.X, vp.Y) * 0.13), 50, 80)
+end
+
+local function slotCenter(slot, S, vp)
+	local gap = math.max(6, math.floor(S * 0.12))
+	local margin = math.max(8, math.floor(S * 0.2))
+	local jumpZone = math.max(110, vp.Y * 0.32)
+	local rowY = vp.Y - jumpZone - S / 2 - gap
+	rowY = math.max(rowY, S * 1.5 + gap + margin)
+	local rightX = vp.X - margin - S / 2
+	if slot == "blue" then
+		return Vector2.new(rightX, rowY)
+	elseif slot == "yellow" then
+		return Vector2.new(rightX - S - gap, rowY)
+	end
+	return Vector2.new(rightX, rowY - S - gap)
+end
+
+local function layoutButton(name, token)
+	local btn = ContextActionService:GetButton(name)
+	if not btn or token ~= buttonsToken then return end
+	local cam = C()
+	if not cam then return end
+	local vp = cam.ViewportSize
+	local S = buttonSize(vp)
+	btn.AnchorPoint = Vector2.new(0.5, 0.5)
+	btn.Size = UDim2.fromOffset(S, S)
+
+	local label = btn:FindFirstChild("ActionTitle")
+	if label and label:IsA("TextLabel") then
+		pcall(function()
+			label.TextScaled = true
+			label.TextWrapped = false
+			if not label:FindFirstChildOfClass("UITextSizeConstraint") then
+				local limit = Instance.new("UITextSizeConstraint")
+				limit.MinTextSize = 8
+				limit.MaxTextSize = 14
+				limit.Parent = label
+			end
+		end)
+	end
+
+	local target = slotCenter(SLOT_OF[name], S, vp)
+	local frame = btn.Parent
+	local off = frame and frame:IsA("GuiBase2d") and (target - frame.AbsolutePosition) or target
+	for _ = 1, 3 do
+		if token ~= buttonsToken then return end
+		ContextActionService:SetPosition(name, UDim2.fromOffset(off.X, off.Y))
+		task.wait()
+		if not btn.Parent then return end
+		local actual = btn.AbsolutePosition + btn.AbsoluteSize / 2
+		local diff = target - actual
+		if diff.Magnitude < 2 then break end
+		off = off + diff
+	end
+end
+
+local function styleButton(name, text, token)
+	local btn
+	for _ = 1, 60 do
+		if token ~= buttonsToken then return end
+		btn = ContextActionService:GetButton(name)
+		if btn then break end
+		task.wait(0.05)
+	end
+	if not btn or token ~= buttonsToken then return end
+	ContextActionService:SetTitle(name, text)
+	layoutButton(name, token)
+end
+
+local relayoutPending = false
+local function relayoutAll(token)
+	if relayoutPending then return end
+	relayoutPending = true
+	task.delay(0.15, function()
+		relayoutPending = false
+		if token ~= buttonsToken or not buttonsBound then return end
+		for name in pairs(SLOT_OF) do
+			task.spawn(function() pcall(layoutButton, name, token) end)
+		end
+	end)
+end
+
+local function watchScreen(token)
+	for _, c in ipairs(buttonConns) do pcall(function() c:Disconnect() end) end
+	buttonConns = {}
+	local function hook(cam)
+		if not cam then return end
+		buttonConns[#buttonConns + 1] = cam:GetPropertyChangedSignal("ViewportSize"):Connect(function() relayoutAll(token) end)
+	end
+	hook(C())
+	buttonConns[#buttonConns + 1] = workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+		hook(C())
+		relayoutAll(token)
+	end)
+end
+
+local function unbindButtons()
+	if not buttonsBound then return end
+	buttonsBound = false
+	buttonsToken += 1
+	for _, c in ipairs(buttonConns) do pcall(function() c:Disconnect() end) end
+	buttonConns = {}
+	for _, n in ipairs({ ACT_YELLOW, ACT_BLUE, ACT_REMOVE }) do
+		pcall(function() ContextActionService:UnbindAction(n) end)
+	end
+end
+
+local function bindButtons()
+	if buttonsBound then return end
+	buttonsBound = true
+	buttonsToken += 1
+	local token = buttonsToken
+
+	local function act(fn)
+		return function(_, state)
+			if state == Enum.UserInputState.Begin then fn() end
+			return Enum.ContextActionResult.Sink
+		end
+	end
+	ContextActionService:BindAction(ACT_YELLOW, act(function() shoot("yellow") end), true)
+	ContextActionService:BindAction(ACT_BLUE, act(function() shoot("blue") end), true)
+	ContextActionService:BindAction(ACT_REMOVE, act(function() clearPortals() end), true)
+
+	watchScreen(token)
+	for _, d in ipairs({
+		{ ACT_YELLOW, "Yellow" },
+		{ ACT_BLUE, "Blue" },
+		{ ACT_REMOVE, "Remove" },
+	}) do
+		task.spawn(function()
+			local ok, err = pcall(styleButton, d[1], d[2], token)
+			if not ok then warn("[PortalGun] button style: " .. tostring(err)) end
+		end)
+	end
+end
+
+track(UIS.InputBegan:Connect(function(input, gp)
+	if gp or not equipped then return end
+	if input.UserInputType == Enum.UserInputType.MouseButton1 then
+		shoot("blue", UIS:GetMouseLocation())
+	elseif input.UserInputType == Enum.UserInputType.MouseButton2 then
+		shoot("yellow", UIS:GetMouseLocation())
+	elseif input.KeyCode == Enum.KeyCode.R then
+		if not holding then clearPortals() end
+	elseif input.KeyCode == Enum.KeyCode.F then
+		if gun and not holding then
+			gun.click:Play()
+			gun.light.Enabled = not gun.light.Enabled
+		end
+	elseif input.KeyCode == Enum.KeyCode.E then
+		if holding then releaseGrab() else startGrab() end
+	end
+end))
+
+local mouse = lp:GetMouse()
+local dragger = nil
+
+local function ggVisible(on)
+	if not gun then return end
+	for _, p in ipairs(gun.gg) do p.Transparency = on and 0 or 1 end
+end
+
+releaseGrab = function()
+	holding = false
+	if dragger then dragger:Destroy() dragger = nil end
+	pcall(function() mouse.TargetFilter = nil end)
+	if gun and gun.grav then gun.grav:Stop() end
+	ggVisible(false)
+	if hud then hud() end
+end
+
+startGrab = function()
+	local char = lp.Character
+	local head = char and char:FindFirstChild("Head")
+	local target = mouse.Target
+	if not (head and target) or target.Anchored or isCharacterPart(target) then return end
+	if (mouse.Hit.Position - head.Position).Magnitude >= 10 then return end
+	holding = true
+	if gun then gun.grav:Play() end
+	ggVisible(true)
+
+	local ball = Instance.new("Part")
+	ball.Name = "DragBall"
+	ball.Transparency = 1
+	ball.CanCollide = false
+	ball.Size = Vector3.new(.2, .2, .2)
+	ball.Shape = Enum.PartType.Ball
+	ball.CFrame = mouse.Hit
+	ball.Parent = workspace
+	dragger = ball
+	mouse.TargetFilter = target
+
+	local weld = Instance.new("ManualWeld", ball)
+	weld.C0 = ball.CFrame:Inverse() * target.CFrame
+	weld.Part0 = ball
+	weld.Part1 = target
+
+	local mover = Instance.new("BodyPosition")
+	mover.Name = "Mover"
+	mover.MaxForce = Vector3.new(40000, 40000, 40000)
+	mover.P = 40000
+	mover.D = 1000
+	mover.Position = ball.Position
+	mover.Parent = ball
+	local rot = Instance.new("BodyGyro")
+	rot.Name = "RotMover"
+	rot.MaxTorque = Vector3.new(3000, 3000, 3000)
+	rot.P = 3000
+	rot.D = 500
+	rot.CFrame = C().CFrame
+	rot.Parent = ball
+
+	hud()
+	task.spawn(function()
+		while dragger == ball and ball.Parent do
+			local h = lp.Character and lp.Character:FindFirstChild("Head")
+			if not h then break end
+			local cf = CFrame.new(h.Position, mouse.Hit.Position)
+			mover.Position = (cf + cf.LookVector * 10).Position
+			rot.CFrame = C().CFrame
+			task.wait()
+		end
+		if dragger == ball then releaseGrab() end
+	end)
+end
+
+local function noCollide(t)
+	for _, d in ipairs(t:GetDescendants()) do
+		if d:IsA("BasePart") then
+			d.CanCollide = false
+			d.CanQuery = false
+			d.CanTouch = false
+			d.Massless = true
+		end
+	end
+end
+
+local function buildTool(rig)
+	local t = Instance.new("Tool")
+	local handle = Instance.new("Part")
+	handle.CanCollide = false
+	t.TextureId = "rbxassetid://13684639970"
+	t.CanBeDropped = false
+	local mesh = Instance.new("SpecialMesh", handle)
+	mesh.MeshId = "rbxassetid://10017565642"
+	mesh.TextureId = "rbxassetid://10017566144"
+	mesh.Scale = Vector3.new(0.2, 0.2, 0.2)
+
+	local function neon(p, shape, pos, size, brick)
+		p.Shape = shape
+		p.Position = pos
+		p.Size = size
+		p.Material = Enum.Material.Neon
+		p.BrickColor = BrickColor.new(brick)
+		p.CanCollide = false
+	end
+
+	local cylinder1 = Instance.new("Part", handle)
+	cylinder1.Shape = Enum.PartType.Cylinder
+	cylinder1.Orientation = Vector3.new(0, 90, 0)
+	cylinder1.Position = Vector3.new(0, -0.1, 0)
+	cylinder1.Size = Vector3.new(2, .5, .5)
+	cylinder1.Material = Enum.Material.SmoothPlastic
+	cylinder1.Color = Color3.fromRGB(50, 50, 50)
+	cylinder1.CanCollide = false
+	local cylinder2 = Instance.new("Part", handle)
+	cylinder2.Shape = Enum.PartType.Cylinder
+	cylinder2.Position = Vector3.new(0, 0, 0.88)
+	cylinder2.Orientation = Vector3.new(0, 0, -90)
+	cylinder2.Size = Vector3.new(1, .2, .2)
+	cylinder2.Material = Enum.Material.Neon
+	cylinder2.BrickColor = BrickColor.new("Really black")
+	cylinder2.CanCollide = false
+
+	local GGblock1 = Instance.new("Part", handle)
+	GGblock1.BrickColor = BrickColor.new("Pastel Blue")
+	GGblock1.Material = Enum.Material.Neon
+	GGblock1.Position = Vector3.new(0.025, 0.355, -2.277)
+	GGblock1.Size = Vector3.new(0.05, 0.743, 0.05)
+	GGblock1.CanCollide = false
+	local GGblock2 = Instance.new("Part", handle)
+	GGblock2.BrickColor = BrickColor.new("Pastel Blue")
+	GGblock2.Material = Enum.Material.Neon
+	GGblock2.Position = Vector3.new(-0.433, -0.377, -2.26)
+	GGblock2.Orientation = Vector3.new(39.204, -86.193, -4.388)
+	GGblock2.Size = Vector3.new(0.05, 0.05, 1.222)
+	GGblock2.CanCollide = false
+	local GGblock3 = Instance.new("Part", handle)
+	GGblock3.BrickColor = BrickColor.new("Pastel Blue")
+	GGblock3.Material = Enum.Material.Neon
+	GGblock3.Position = Vector3.new(0.486, -0.37, -2.258)
+	GGblock3.Orientation = Vector3.new(37.547, 86.861, 176.758)
+	GGblock3.Size = Vector3.new(0.05, 0.05, 1.222)
+	GGblock3.CanCollide = false
+	local GGBall1 = Instance.new("Part", handle)
+	GGBall1.Shape = Enum.PartType.Ball
+	GGBall1.Material = Enum.Material.Neon
+	GGBall1.BrickColor = BrickColor.new("Pastel Blue")
+	GGBall1.Size = Vector3.new(0.224, 0.224, 0.224)
+	GGBall1.Position = Vector3.new(0.051, 0.699, -2.306)
+	GGBall1.CanCollide = false
+	local GGBall2 = Instance.new("Part", handle)
+	GGBall2.Shape = Enum.PartType.Ball
+	GGBall2.Material = Enum.Material.Neon
+	GGBall2.BrickColor = BrickColor.new("Pastel Blue")
+	GGBall2.Size = Vector3.new(0.224, 0.224, 0.224)
+	GGBall2.Position = Vector3.new(-0.93, -0.765, -2.23)
+	GGBall2.CanCollide = false
+	local GGBall3 = Instance.new("Part", handle)
+	GGBall3.Shape = Enum.PartType.Ball
+	GGBall3.Material = Enum.Material.Neon
+	GGBall3.BrickColor = BrickColor.new("Pastel Blue")
+	GGBall3.Size = Vector3.new(0.224, 0.224, 0.224)
+	GGBall3.Position = Vector3.new(0.931, -0.743, -2.23)
+	GGBall3.CanCollide = false
+
+	local gg = { GGblock1, GGblock2, GGblock3, GGBall1, GGBall2, GGBall3 }
+	local weldList = { cylinder2, cylinder1, GGblock1, GGblock2, GGblock3, GGBall1, GGBall2, GGBall3 }
+	for _, p in ipairs(weldList) do
+		local w = Instance.new("WeldConstraint", t)
+		w.Part0 = handle
+		w.Part1 = p
+	end
+	for _, p in ipairs(gg) do p.Transparency = 1 end
+
+	local grav = Instance.new("Sound", handle)
+	grav.Looped = true
+	grav.SoundId = SND_GRAVITY
+
+	handle.Name = "Handle"
+	handle.Color = Color3.fromRGB(255, 255, 255)
+	handle.Size = Vector3.new(1.1, 1.1, 2.8)
+	handle.Material = Enum.Material.SmoothPlastic
+	handle.Parent = t
+	t.Name = "Portal Gun"
+	t.Grip = CFrame.new(-0.0499999896, -0.5, 0.25, 1, 0, 0, 0, 1, 0, 0, 0, 1)
+
+	local light = Instance.new("SpotLight", handle)
+	light.Angle = 45
+	light.Brightness = 2
+	light.Range = 60
+	light.Enabled = false
+	local click = Instance.new("Sound", handle)
+	click.SoundId = SND_CLICK
+
+	gun = { handle = handle, cyl1 = cylinder1, cyl2 = cylinder2, gg = gg, light = light, click = click, grav = grav }
+
+	t.Equipped:Connect(function()
+		equipped = true
+		noCollide(t)
+		task.delay(0.5, function() noCollide(t) end)
+		bindButtons()
+		hud()
+	end)
+	t.Unequipped:Connect(function()
+		equipped = false
+		unbindButtons()
+		releaseGrab()
+		hud()
+	end)
+	t.AncestryChanged:Connect(function()
+		if not t.Parent then
+			equipped = false
+			unbindButtons()
+			releaseGrab()
+			hud()
+		end
+	end)
+	return t
+end
+
+local function giveTool()
+	local bp = lp:WaitForChild("Backpack")
+	if tool then pcall(function() tool:Destroy() end) end
+	equipped = false
+	unbindButtons()
+	local hum = lp.Character and lp.Character:FindFirstChildOfClass("Humanoid")
+	tool = buildTool(hum and hum.RigType or Enum.HumanoidRigType.R6)
+	tool.Parent = bp
+	if hum then
+		hum.Died:Connect(function()
+			releaseGrab()
+			clearPortals()
+			pcall(function() if tool then tool:Destroy() end end)
+		end)
+		pcall(function() hum:EquipTool(tool) end)
+	end
+	hud()
+end
+
+do
+	local function gunOff()
+		if not (tool and tool.Parent) then return end
+		for _, d in ipairs(tool:GetDescendants()) do
+			if d:IsA("BasePart") then
+				if d.CanCollide then d.CanCollide = false end
+				if d.CanTouch then d.CanTouch = false end
+				if d.CanQuery then d.CanQuery = false end
+				if not d.Massless then d.Massless = true end
+			end
+		end
+	end
+	local okS, pre = pcall(function() return RunService.PreSimulation end)
+	track((okS and pre or RunService.Stepped):Connect(gunOff))
+	track(RunService.Heartbeat:Connect(gunOff))
+end
+
+track(lp.CharacterRemoving:Connect(function()
+	unbindButtons()
+	releaseGrab()
+end))
+
+track(lp.CharacterAdded:Connect(function()
+	clearPortals()
+	releaseGrab()
+	task.wait(0.6)
+	giveTool()
+end))
+giveTool()
+
+task.spawn(function()
+	local StarterGui = game:GetService("StarterGui")
+	local icon
+	local done = false
+	task.spawn(function()
+		pcall(function()
+			local id = Players:GetUserIdFromNameAsync("DuaKNo")
+			icon = Players:GetUserThumbnailAsync(id, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size150x150)
+		end)
+		done = true
+	end)
+	local t0 = os.clock()
+	while not done and os.clock() - t0 < 3 do task.wait(0.05) end
+	local function notify(title, text, img)
+		for _ = 1, 10 do
+			if pcall(function()
+				StarterGui:SetCore("SendNotification", { Title = title, Text = text, Icon = img, Duration = 3 })
+			end) then return end
+			task.wait(0.2)
+		end
+	end
+	task.spawn(notify, "Portal Gun", "Mobile version by DuaKNo", icon)
+	task.spawn(notify, "Portal Gun", "Join Discord server for more\ndiscord.gg/empgqd5qpq")
+end)
+
+_G.PortalGunCleanup = function()
+	for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+	unbindButtons()
+	clearPortals()
+	releaseGrab()
+	pcall(function() if r6.rs then r6.rs.C0, r6.ls.C0, r6.nk.C0 = r6.rs0, r6.ls0, r6.nk0 end end)
+	pcall(function() gui:Destroy() end)
+	pcall(function() fxFolder:Destroy() end)
+	pcall(function() if tool then tool:Destroy() end end)
+	_G.PortalGunCleanup = nil
+end
