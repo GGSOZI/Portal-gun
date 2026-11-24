@@ -726,11 +726,12 @@ track(RunService.Heartbeat:Connect(function(dt)
 end))
 
 local ACT_YELLOW, ACT_BLUE, ACT_REMOVE = "PortalGun_Yellow", "PortalGun_Blue", "PortalGun_Remove"
+local ACT_FLASH, ACT_GRAB = "PortalGun_Flash", "PortalGun_Grab"
 local buttonsBound = false
 local buttonsToken = 0
 
 local buttonConns = {}
-local SLOT_OF = { [ACT_YELLOW] = "yellow", [ACT_BLUE] = "blue", [ACT_REMOVE] = "remove" }
+local SLOT_OF = { [ACT_YELLOW] = "yellow", [ACT_BLUE] = "blue", [ACT_REMOVE] = "remove", [ACT_FLASH] = "flash", [ACT_GRAB] = "grab" }
 
 local function buttonSize(vp)
 	return math.clamp(math.floor(math.min(vp.X, vp.Y) * 0.13), 50, 80)
@@ -748,7 +749,13 @@ local function slotCenter(slot, S, vp)
 	elseif slot == "yellow" then
 		return Vector2.new(rightX - S - gap, rowY)
 	end
-	return Vector2.new(rightX, rowY - S - gap)
+	local row2 = rowY - S - gap
+	if slot == "flash" then
+		return Vector2.new(rightX - S - gap, row2)
+	elseif slot == "grab" then
+		return Vector2.new(rightX - (S + gap) * 2, row2)
+	end
+	return Vector2.new(rightX, row2)
 end
 
 local function layoutButton(name, token)
@@ -836,8 +843,20 @@ local function unbindButtons()
 	buttonsToken += 1
 	for _, c in ipairs(buttonConns) do pcall(function() c:Disconnect() end) end
 	buttonConns = {}
-	for _, n in ipairs({ ACT_YELLOW, ACT_BLUE, ACT_REMOVE }) do
+	for _, n in ipairs({ ACT_YELLOW, ACT_BLUE, ACT_REMOVE, ACT_FLASH, ACT_GRAB }) do
 		pcall(function() ContextActionService:UnbindAction(n) end)
+	end
+end
+
+local function setGrabTitle()
+	if not buttonsBound then return end
+	pcall(function() ContextActionService:SetTitle(ACT_GRAB, holding and "Drop" or "Grab") end)
+end
+
+local function toggleFlash()
+	if gun and not holding then
+		gun.click:Play()
+		gun.light.Enabled = not gun.light.Enabled
 	end
 end
 
@@ -856,12 +875,18 @@ local function bindButtons()
 	ContextActionService:BindAction(ACT_YELLOW, act(function() shoot("yellow") end), true)
 	ContextActionService:BindAction(ACT_BLUE, act(function() shoot("blue") end), true)
 	ContextActionService:BindAction(ACT_REMOVE, act(function() clearPortals() end), true)
+	ContextActionService:BindAction(ACT_FLASH, act(function() toggleFlash() end), true)
+	ContextActionService:BindAction(ACT_GRAB, act(function()
+		if holding then releaseGrab() else startGrab(true) end
+	end), true)
 
 	watchScreen(token)
 	for _, d in ipairs({
 		{ ACT_YELLOW, "Yellow" },
 		{ ACT_BLUE, "Blue" },
 		{ ACT_REMOVE, "Remove" },
+		{ ACT_FLASH, "Flash" },
+		{ ACT_GRAB, "Grab" },
 	}) do
 		task.spawn(function()
 			local ok, err = pcall(styleButton, d[1], d[2], token)
@@ -879,10 +904,7 @@ track(UIS.InputBegan:Connect(function(input, gp)
 	elseif input.KeyCode == Enum.KeyCode.R then
 		if not holding then clearPortals() end
 	elseif input.KeyCode == Enum.KeyCode.F then
-		if gun and not holding then
-			gun.click:Play()
-			gun.light.Enabled = not gun.light.Enabled
-		end
+		toggleFlash()
 	elseif input.KeyCode == Enum.KeyCode.E then
 		if holding then releaseGrab() else startGrab() end
 	end
@@ -902,15 +924,33 @@ releaseGrab = function()
 	pcall(function() mouse.TargetFilter = nil end)
 	if gun and gun.grav then gun.grav:Stop() end
 	ggVisible(false)
+	setGrabTitle()
 	if hud then hud() end
 end
 
-startGrab = function()
+startGrab = function(fromCenter)
 	local char = lp.Character
 	local head = char and char:FindFirstChild("Head")
-	local target = mouse.Target
+	local cam = C()
+	local function centerHit(extra)
+		if not cam then return nil end
+		local vp = cam.ViewportSize
+		local ray = cam:ViewportPointToRay(vp.X / 2, vp.Y / 2)
+		local ign = { char, fxFolder }
+		if extra then ign[#ign + 1] = extra end
+		return castRay(ray.Origin, ray.Direction * 600, ign)
+	end
+	local target, hitPos
+	if fromCenter then
+		local r = centerHit()
+		target = r and r.Instance
+		hitPos = r and r.Position
+	else
+		target = mouse.Target
+		hitPos = mouse.Hit.Position
+	end
 	if not (head and target) or target.Anchored or isCharacterPart(target) then return end
-	if (mouse.Hit.Position - head.Position).Magnitude >= 10 then return end
+	if (hitPos - head.Position).Magnitude >= 10 then return end
 	holding = true
 	if gun then gun.grav:Play() end
 	ggVisible(true)
@@ -921,10 +961,11 @@ startGrab = function()
 	ball.CanCollide = false
 	ball.Size = Vector3.new(.2, .2, .2)
 	ball.Shape = Enum.PartType.Ball
-	ball.CFrame = mouse.Hit
+	ball.CFrame = CFrame.new(hitPos)
 	ball.Parent = workspace
 	dragger = ball
 	mouse.TargetFilter = target
+	setGrabTitle()
 
 	local weld = Instance.new("ManualWeld", ball)
 	weld.C0 = ball.CFrame:Inverse() * target.CFrame
@@ -951,7 +992,13 @@ startGrab = function()
 		while dragger == ball and ball.Parent do
 			local h = lp.Character and lp.Character:FindFirstChild("Head")
 			if not h then break end
-			local cf = CFrame.new(h.Position, mouse.Hit.Position)
+			local aim = mouse.Hit.Position
+			if fromCenter then
+				local r = centerHit(target)
+				local cl = cam and cam.CFrame
+				aim = r and r.Position or (cl and cl.Position + cl.LookVector * 100) or aim
+			end
+			local cf = CFrame.new(h.Position, aim)
 			mover.Position = (cf + cf.LookVector * 10).Position
 			rot.CFrame = C().CFrame
 			task.wait()
